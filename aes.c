@@ -71,7 +71,10 @@ NOTE:   String length must be evenly divisible by 16byte (str_len % 16 == 0)
 // state - array holding the intermediate results during decryption.
 typedef uint8_t state_t[4][4];
 
-
+typedef union {
+  uint8_t a[4];
+  uint32_t i;
+} helper_t;
 
 // The lookup-tables are marked const so they can be placed in read-only storage instead of RAM
 // The numbers below can be computed dynamically trading ROM for RAM - 
@@ -147,10 +150,7 @@ static uint8_t getSBoxValue(uint8_t num)
 static void KeyExpansion(roundKey_t* RoundKey, const uint8_t* Key)
 {
   unsigned i, j, k;
-  union {
-    uint8_t a[4]; // Used for the column/row operations
-    uint32_t i;
-  } temp;
+  helper_t temp;
   
   // The first round key is the key itself.
   memcpy(RoundKey, Key, 4 * Nk);
@@ -244,7 +244,7 @@ static void SubBytes(state_t* state)
   {
     for (j = 0; j < 4; ++j)
     {
-      (*state)[j][i] = getSBoxValue((*state)[j][i]);
+      (*state)[i][j] = getSBoxValue((*state)[i][j]);
     }
   }
 }
@@ -280,24 +280,23 @@ static void ShiftRows(state_t* state)
   (*state)[1][3] = temp;
 }
 
-static uint8_t xtime(uint8_t x)
+static inline uint32_t xtime(uint32_t x)
 {
-  return ((x<<1) ^ (((x>>7) & 1) * 0x1b));
+  return ((x&0x7f7f7f7f)<<1)^(((x&0x80808080)>>7)*0x1b);
 }
 
 // MixColumns function mixes the columns of the state matrix
 static void MixColumns(state_t* state)
 {
-  uint8_t i;
-  uint8_t Tmp, Tm, t;
-  for (i = 0; i < 4; ++i)
-  {  
-    t   = (*state)[i][0];
-    Tmp = (*state)[i][0] ^ (*state)[i][1] ^ (*state)[i][2] ^ (*state)[i][3] ;
-    Tm  = (*state)[i][0] ^ (*state)[i][1] ; Tm = xtime(Tm);  (*state)[i][0] ^= Tm ^ Tmp ;
-    Tm  = (*state)[i][1] ^ (*state)[i][2] ; Tm = xtime(Tm);  (*state)[i][1] ^= Tm ^ Tmp ;
-    Tm  = (*state)[i][2] ^ (*state)[i][3] ; Tm = xtime(Tm);  (*state)[i][2] ^= Tm ^ Tmp ;
-    Tm  = (*state)[i][3] ^ t ;              Tm = xtime(Tm);  (*state)[i][3] ^= Tm ^ Tmp ;
+  for (uint8_t i=0;i<4;i++) {
+    helper_t sp;
+    memcpy(sp.a, (*state)[i], 4);
+
+    sp.i = xtime((sp.i) ^ (((sp.i)>>8)|((sp.i)<<24))) ^
+            (((sp.i)<<8)|((sp.i)>>24)) ^
+            (((sp.i)<<16)|((sp.i)>>16)) ^ (((sp.i)<<24)|((sp.i)>>8));
+
+    memcpy((*state)[i], sp.a, 4);
   }
 }
 
@@ -305,25 +304,23 @@ static void MixColumns(state_t* state)
 // Note: The last call to xtime() is unneeded, but often ends up generating a smaller binary
 //       The compiler seems to be able to vectorize the operation better this way.
 //       See https://github.com/kokke/tiny-AES-c/pull/34
-#if MULTIPLY_AS_A_FUNCTION
-static uint8_t Multiply(uint8_t x, uint8_t y)
+// #if MULTIPLY_AS_A_FUNCTION
+static inline uint32_t Multiply(uint32_t x, uint32_t y)
 {
-  return (((y & 1) * x) ^
-       ((y>>1 & 1) * xtime(x)) ^
-       ((y>>2 & 1) * xtime(xtime(x))) ^
-       ((y>>3 & 1) * xtime(xtime(xtime(x)))) ^
-       ((y>>4 & 1) * xtime(xtime(xtime(xtime(x)))))); /* this last call to xtime() can be omitted */
-  }
-#else
-#define Multiply(x, y)                                \
-      (  ((y & 1) * x) ^                              \
-      ((y>>1 & 1) * xtime(x)) ^                       \
-      ((y>>2 & 1) * xtime(xtime(x))) ^                \
-      ((y>>3 & 1) * xtime(xtime(xtime(x)))) ^         \
-      ((y>>4 & 1) * xtime(xtime(xtime(xtime(x))))))   \
+    uint32_t xtimeX = xtime(x);
+    uint32_t xtimeXX = xtime(xtimeX);
+    uint32_t xtimeXXX = xtime(xtimeXX);
 
+    return ((~((y & 1)-1) & x) ^
+            (~((y>>1 & 1)-1) & xtimeX) ^
+            (~((y>>2 & 1)-1) & xtimeXX) ^
+            (~((y>>3 & 1)-1) & xtimeXXX)
+#if defined(_MSC_VER) && defined(_M_AMD64)
+            ^
+       (~((y>>4 & 1)-1) & xtime(xtimeXXX))
 #endif
-
+    ); /* this last call to xtime() can be omitted */
+}
 #if (defined(CBC) && CBC == 1) || (defined(ECB) && ECB == 1)
 /*
 static uint8_t getSBoxInvert(uint8_t num)
@@ -338,19 +335,37 @@ static uint8_t getSBoxInvert(uint8_t num)
 // Please use the references to gain more information.
 static void InvMixColumns(state_t* state)
 {
-  int i;
-  uint8_t a, b, c, d;
-  for (i = 0; i < 4; ++i)
-  { 
-    a = (*state)[i][0];
-    b = (*state)[i][1];
-    c = (*state)[i][2];
-    d = (*state)[i][3];
+  uint32_t xtimeX;
+  uint32_t xtimeXX;
+  uint32_t xtimeXXX;
+  uint32_t xtime_x9;
+  uint32_t xtime_xb;
+  uint32_t xtime_xd;
+  uint32_t xtime_xe;
+  //*sp++ = i;
 
-    (*state)[i][0] = Multiply(a, 0x0e) ^ Multiply(b, 0x0b) ^ Multiply(c, 0x0d) ^ Multiply(d, 0x09);
-    (*state)[i][1] = Multiply(a, 0x09) ^ Multiply(b, 0x0e) ^ Multiply(c, 0x0b) ^ Multiply(d, 0x0d);
-    (*state)[i][2] = Multiply(a, 0x0d) ^ Multiply(b, 0x09) ^ Multiply(c, 0x0e) ^ Multiply(d, 0x0b);
-    (*state)[i][3] = Multiply(a, 0x0b) ^ Multiply(b, 0x0d) ^ Multiply(c, 0x09) ^ Multiply(d, 0x0e);
+  for (uint8_t i=0; i<4; i++)
+  {
+    helper_t spVal;
+    memcpy(spVal.a, (*state)[i], 4);
+    xtimeX = xtime(spVal.i);
+    xtimeXX = xtime(xtimeX);
+    xtimeXXX = xtime(xtimeXX);
+
+    xtime_x9 = xtimeXXX ^ spVal.i;
+    xtime_xb = xtimeXXX ^ xtimeX ^ spVal.i;
+    xtime_xd = xtimeXXX ^ xtimeXX ^ spVal.i;
+    xtime_xe = xtimeXXX ^ xtimeXX ^ xtimeX;
+
+    uint32_t xtime_xb_r8 =  xtime_xb >> 8;
+    uint32_t xtime_xd_r16 = xtime_xd >> 16;
+    uint32_t xtime_x9_l8 =  xtime_x9 << 8;
+    uint32_t xtime_xd_l16 = xtime_xd << 16;
+
+    (*state)[i][0] = ((xtime_xe         ^ xtime_xb_r8  ^ xtime_xd_r16 ^ (xtime_x9 >> 24)) & 0xff);
+    (*state)[i][1] = ((xtime_x9_l8      ^ xtime_xe     ^ xtime_xb_r8  ^ xtime_xd_r16    ) >> 8 & 0xff);
+    (*state)[i][2] = ((xtime_xd_l16     ^ xtime_x9_l8  ^ xtime_xe     ^ xtime_xb_r8     ) >> 16 & 0xff);
+    (*state)[i][3] = (((xtime_xb << 24) ^ xtime_xd_l16 ^ xtime_x9_l8  ^ xtime_xe        ) >> 24 & 0xff);
   }
 }
 
