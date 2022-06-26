@@ -41,6 +41,50 @@ NOTE:   String length must be evenly divisible by 16byte (str_len % 16 == 0)
 /*****************************************************************************/
 /* Defines:                                                                  */
 /*****************************************************************************/
+#define MASK32_BYTE0  0x000000FF
+#define MASK32_BYTE1  0x0000FF00
+#define MASK32_BYTE2  0x00FF0000
+#define MASK32_BYTE3  0xFF000000
+
+#define MASK64_BYTE0  0x00000000000000FF
+#define MASK64_BYTE1  0x000000000000FF00
+#define MASK64_BYTE2  0x0000000000FF0000
+#define MASK64_BYTE3  0x00000000FF000000
+#define MASK64_BYTE4  0x000000FF00000000
+#define MASK64_BYTE5  0x0000FF0000000000
+#define MASK64_BYTE6  0x00FF000000000000
+#define MASK64_BYTE7  0xFF00000000000000
+
+
+#define INVMASK32_BYTE0  0xFFFFFF00
+#define INVMASK32_BYTE1  0xFFFF00FF
+#define INVMASK32_BYTE2  0xFF00FFFF
+#define INVMASK32_BYTE3  0x00FFFFFF
+
+#define INVMASK64_BYTE0  0xFFFFFFFFFFFFFF00
+#define INVMASK64_BYTE1  0xFFFFFFFFFFFF00FF
+#define INVMASK64_BYTE2  0xFFFFFFFFFF00FFFF
+#define INVMASK64_BYTE3  0xFFFFFFFF00FFFFFF
+#define INVMASK64_BYTE4  0xFFFFFF00FFFFFFFF
+#define INVMASK64_BYTE5  0xFFFF00FFFFFFFFFF
+#define INVMASK64_BYTE6  0xFF00FFFFFFFFFFFF
+#define INVMASK64_BYTE7  0x00FFFFFFFFFFFFFF
+
+
+#define OFS32_BYTE0   0
+#define OFS32_BYTE1   8
+#define OFS32_BYTE2   16
+#define OFS32_BYTE3   24
+
+#define OFS64_BYTE0   0
+#define OFS64_BYTE1   8
+#define OFS64_BYTE2   16
+#define OFS64_BYTE3   24
+#define OFS64_BYTE4   32
+#define OFS64_BYTE5   40
+#define OFS64_BYTE6   48
+#define OFS64_BYTE7   56
+
 // The number of columns comprising a state in AES. This is a constant in AES. Value=4
 #define Nb 4
 
@@ -69,7 +113,10 @@ NOTE:   String length must be evenly divisible by 16byte (str_len % 16 == 0)
 /* Private variables:                                                        */
 /*****************************************************************************/
 // state - array holding the intermediate results during decryption.
-typedef uint8_t state_t[4][4];
+typedef union {
+  uint8_t a[4][4];
+  uint32_t i[4];
+}__attribute__((packed)) state_t;
 
 typedef union {
   uint8_t a[4];
@@ -180,10 +227,10 @@ static void KeyExpansion(roundKey_t* RoundKey, const uint8_t* Key)
 
       // Function Subword()
       {
-        temp.a[0] = getSBoxValue(temp.a[0]);
-        temp.a[1] = getSBoxValue(temp.a[1]);
-        temp.a[2] = getSBoxValue(temp.a[2]);
-        temp.a[3] = getSBoxValue(temp.a[3]);
+        temp.i = (getSBoxValue(temp.a[0]) << OFS32_BYTE0) |
+                 (getSBoxValue(temp.a[1]) << OFS32_BYTE1) |
+                 (getSBoxValue(temp.a[2]) << OFS32_BYTE2) |
+                 (getSBoxValue(temp.a[3]) << OFS32_BYTE3);
       }
 
       temp.a[0] = temp.a[0] ^ getRconValue(i/Nk);
@@ -193,10 +240,10 @@ static void KeyExpansion(roundKey_t* RoundKey, const uint8_t* Key)
     {
       // Function Subword()
       {
-        temp.a[0] = getSBoxValue(temp.a[0]);
-        temp.a[1] = getSBoxValue(temp.a[1]);
-        temp.a[2] = getSBoxValue(temp.a[2]);
-        temp.a[3] = getSBoxValue(temp.a[3]);
+        temp.i = (getSBoxValue(temp.a[0]) << OFS32_BYTE0) |
+                 (getSBoxValue(temp.a[1]) << OFS32_BYTE1) |
+                 (getSBoxValue(temp.a[2]) << OFS32_BYTE2) |
+                 (getSBoxValue(temp.a[3]) << OFS32_BYTE3);
       }
     }
 #endif
@@ -225,13 +272,10 @@ void AES_ctx_set_iv(struct AES_ctx* ctx, const uint8_t* iv)
 // The round key is added to the state by an XOR function.
 static void AddRoundKey(uint8_t round, state_t* state, const roundKey_t* RoundKey)
 {
-  uint8_t i,j;
+  uint8_t i;
   for (i = 0; i < 4; ++i)
   {
-    for (j = 0; j < 4; ++j)
-    {
-      (*state)[i][j] ^= RoundKey->a[(round * Nb * 4) + (i * Nb) + j];
-    }
+    (*state).i[i] ^= RoundKey->i[(round * Nb) + i];
   }
 }
 
@@ -239,13 +283,16 @@ static void AddRoundKey(uint8_t round, state_t* state, const roundKey_t* RoundKe
 // state matrix with values in an S-box.
 static void SubBytes(state_t* state)
 {
-  uint8_t i, j;
-  for (i = 0; i < 4; ++i)
+  uint8_t i;
+  for (i = 0; i < 4; i++)
   {
-    for (j = 0; j < 4; ++j)
-    {
-      (*state)[i][j] = getSBoxValue((*state)[i][j]);
-    }
+    helper_t tmp;
+    tmp.i = (*state).i[i];
+
+    (*state).i[i] = (getSBoxValue(tmp.a[0]) << OFS32_BYTE0) | 
+                    (getSBoxValue(tmp.a[1]) << OFS32_BYTE1) |
+                    (getSBoxValue(tmp.a[2]) << OFS32_BYTE2) |
+                    (getSBoxValue(tmp.a[3]) << OFS32_BYTE3);
   }
 }
 
@@ -254,30 +301,49 @@ static void SubBytes(state_t* state)
 // Offset = Row number. So the first row is not shifted.
 static void ShiftRows(state_t* state)
 {
-  uint8_t temp;
+  uint32_t line0 = (*state).i[0];
+  uint32_t line1 = (*state).i[1];
+  uint32_t line2 = (*state).i[2];
+  uint32_t line3 = (*state).i[3];
 
-  // Rotate first row 1 columns to left  
-  temp           = (*state)[0][1];
-  (*state)[0][1] = (*state)[1][1];
-  (*state)[1][1] = (*state)[2][1];
-  (*state)[2][1] = (*state)[3][1];
-  (*state)[3][1] = temp;
+  uint32_t temp;
 
-  // Rotate second row 2 columns to left  
-  temp           = (*state)[0][2];
-  (*state)[0][2] = (*state)[2][2];
-  (*state)[2][2] = temp;
+  temp = line0 & MASK32_BYTE1;
+  line0 &= INVMASK32_BYTE1;
+  line0 |= line1 & MASK32_BYTE1;
+  line1 &= INVMASK32_BYTE1;
+  line1 |= line2 & MASK32_BYTE1;
+  line2 &= INVMASK32_BYTE1;
+  line2 |= line3 & MASK32_BYTE1;
+  line3 &= INVMASK32_BYTE1;
+  line3 |= temp;
 
-  temp           = (*state)[1][2];
-  (*state)[1][2] = (*state)[3][2];
-  (*state)[3][2] = temp;
+  temp = line0 & MASK32_BYTE2;
+  line0 &= INVMASK32_BYTE2;
+  line0 |= line2 & MASK32_BYTE2;
+  line2 &= INVMASK32_BYTE2;
+  line2 |= temp;
 
-  // Rotate third row 3 columns to left
-  temp           = (*state)[0][3];
-  (*state)[0][3] = (*state)[3][3];
-  (*state)[3][3] = (*state)[2][3];
-  (*state)[2][3] = (*state)[1][3];
-  (*state)[1][3] = temp;
+  temp = line1 & MASK32_BYTE2;
+  line1 &= INVMASK32_BYTE2;
+  line1 |= line3 & MASK32_BYTE2;
+  line3 &= INVMASK32_BYTE2;
+  line3 |= temp;
+
+  temp = line0 & MASK32_BYTE3;
+  line0 &= INVMASK32_BYTE3;
+  line0 |= line3 & MASK32_BYTE3;
+  line3 &= INVMASK32_BYTE3;
+  line3 |= line2 & MASK32_BYTE3;
+  line2 &= INVMASK32_BYTE3;
+  line2 |= line1 & MASK32_BYTE3;
+  line1 &= INVMASK32_BYTE3;
+  line1 |= temp;
+
+  (*state).i[0] = line0;
+  (*state).i[1] = line1;
+  (*state).i[2] = line2;
+  (*state).i[3] = line3;
 }
 
 static inline uint32_t xtime(uint32_t x)
@@ -289,14 +355,11 @@ static inline uint32_t xtime(uint32_t x)
 static void MixColumns(state_t* state)
 {
   for (uint8_t i=0;i<4;i++) {
-    helper_t sp;
-    memcpy(sp.a, (*state)[i], 4);
+    uint32_t sp = (*state).i[i];
 
-    sp.i = xtime((sp.i) ^ (((sp.i)>>8)|((sp.i)<<24))) ^
-            (((sp.i)<<8)|((sp.i)>>24)) ^
-            (((sp.i)<<16)|((sp.i)>>16)) ^ (((sp.i)<<24)|((sp.i)>>8));
-
-    memcpy((*state)[i], sp.a, 4);
+    (*state).i[i] = xtime((sp) ^ (((sp)>>8)|((sp)<<24))) ^
+            (((sp)<<8)|((sp)>>24)) ^
+            (((sp)<<16)|((sp)>>16)) ^ (((sp)<<24)|((sp)>>8));
   }
 }
 
@@ -335,6 +398,7 @@ static uint8_t getSBoxInvert(uint8_t num)
 // Please use the references to gain more information.
 static void InvMixColumns(state_t* state)
 {
+  uint32_t spVal;
   uint32_t xtimeX;
   uint32_t xtimeXX;
   uint32_t xtimeXXX;
@@ -342,19 +406,17 @@ static void InvMixColumns(state_t* state)
   uint32_t xtime_xb;
   uint32_t xtime_xd;
   uint32_t xtime_xe;
-  //*sp++ = i;
 
   for (uint8_t i=0; i<4; i++)
   {
-    helper_t spVal;
-    memcpy(spVal.a, (*state)[i], 4);
-    xtimeX = xtime(spVal.i);
+    spVal = (*state).i[i];
+    xtimeX = xtime(spVal);
     xtimeXX = xtime(xtimeX);
     xtimeXXX = xtime(xtimeXX);
 
-    xtime_x9 = xtimeXXX ^ spVal.i;
-    xtime_xb = xtimeXXX ^ xtimeX ^ spVal.i;
-    xtime_xd = xtimeXXX ^ xtimeXX ^ spVal.i;
+    xtime_x9 = xtimeXXX ^ spVal;
+    xtime_xb = xtimeXXX ^ xtimeX ^ spVal;
+    xtime_xd = xtimeXXX ^ xtimeXX ^ spVal;
     xtime_xe = xtimeXXX ^ xtimeXX ^ xtimeX;
 
     uint32_t xtime_xb_r8 =  xtime_xb >> 8;
@@ -362,10 +424,11 @@ static void InvMixColumns(state_t* state)
     uint32_t xtime_x9_l8 =  xtime_x9 << 8;
     uint32_t xtime_xd_l16 = xtime_xd << 16;
 
-    (*state)[i][0] = ((xtime_xe         ^ xtime_xb_r8  ^ xtime_xd_r16 ^ (xtime_x9 >> 24)) & 0xff);
-    (*state)[i][1] = ((xtime_x9_l8      ^ xtime_xe     ^ xtime_xb_r8  ^ xtime_xd_r16    ) >> 8 & 0xff);
-    (*state)[i][2] = ((xtime_xd_l16     ^ xtime_x9_l8  ^ xtime_xe     ^ xtime_xb_r8     ) >> 16 & 0xff);
-    (*state)[i][3] = (((xtime_xb << 24) ^ xtime_xd_l16 ^ xtime_x9_l8  ^ xtime_xe        ) >> 24 & 0xff);
+    (*state).i[i] =
+        /* byte 0:*/ (((xtime_xe         ^ xtime_xb_r8  ^ xtime_xd_r16 ^ (xtime_x9 >> 24)) & 0x000000ff) |
+        /* byte 1:*/  ((xtime_x9_l8      ^ xtime_xe     ^ xtime_xb_r8  ^ xtime_xd_r16    ) & 0x0000ff00) |
+        /* byte 2:*/  ((xtime_xd_l16     ^ xtime_x9_l8  ^ xtime_xe     ^ xtime_xb_r8     ) & 0x00ff0000) |
+        /* byte 3:*/  (((xtime_xb << 24) ^ xtime_xd_l16 ^ xtime_x9_l8  ^ xtime_xe        ) & 0xff000000));
   }
 }
 
@@ -374,42 +437,64 @@ static void InvMixColumns(state_t* state)
 // state matrix with values in an S-box.
 static void InvSubBytes(state_t* state)
 {
-  uint8_t i, j;
-  for (i = 0; i < 4; ++i)
+  uint8_t i;
+  for (i = 0; i < 4; i++)
   {
-    for (j = 0; j < 4; ++j)
-    {
-      (*state)[j][i] = getSBoxInvert((*state)[j][i]);
-    }
+    helper_t tmp;
+    tmp.i = (*state).i[i];
+
+    (*state).i[i] = (getSBoxInvert(tmp.a[0]) << OFS32_BYTE0) |
+                    (getSBoxInvert(tmp.a[1]) << OFS32_BYTE1) |
+                    (getSBoxInvert(tmp.a[2]) << OFS32_BYTE2) |
+                    (getSBoxInvert(tmp.a[3]) << OFS32_BYTE3);
   }
 }
 
 static void InvShiftRows(state_t* state)
 {
-  uint8_t temp;
+  uint32_t line0 = (*state).i[0];
+  uint32_t line1 = (*state).i[1];
+  uint32_t line2 = (*state).i[2];
+  uint32_t line3 = (*state).i[3];
 
-  // Rotate first row 1 columns to right  
-  temp = (*state)[3][1];
-  (*state)[3][1] = (*state)[2][1];
-  (*state)[2][1] = (*state)[1][1];
-  (*state)[1][1] = (*state)[0][1];
-  (*state)[0][1] = temp;
+  uint32_t temp;
 
-  // Rotate second row 2 columns to right 
-  temp = (*state)[0][2];
-  (*state)[0][2] = (*state)[2][2];
-  (*state)[2][2] = temp;
+  temp = line3 & MASK32_BYTE1;
+  line3 &= INVMASK32_BYTE1;
+  line3 |= line2 & MASK32_BYTE1;
+  line2 &= INVMASK32_BYTE1;
+  line2 |= line1 & MASK32_BYTE1;
+  line1 &= INVMASK32_BYTE1;
+  line1 |= line0 & MASK32_BYTE1;
+  line0 &= INVMASK32_BYTE1;
+  line0 |= temp;
 
-  temp = (*state)[1][2];
-  (*state)[1][2] = (*state)[3][2];
-  (*state)[3][2] = temp;
+  temp = line0 & MASK32_BYTE2;
+  line0 &= INVMASK32_BYTE2;
+  line0 |= line2 & MASK32_BYTE2;
+  line2 &= INVMASK32_BYTE2;
+  line2 |= temp;
 
-  // Rotate third row 3 columns to right
-  temp = (*state)[0][3];
-  (*state)[0][3] = (*state)[1][3];
-  (*state)[1][3] = (*state)[2][3];
-  (*state)[2][3] = (*state)[3][3];
-  (*state)[3][3] = temp;
+  temp = line1 & MASK32_BYTE2;
+  line1 &= INVMASK32_BYTE2;
+  line1 |= line3 & MASK32_BYTE2;
+  line3 &= INVMASK32_BYTE2;
+  line3 |= temp;
+
+  temp = line0 & MASK32_BYTE3;
+  line0 &= INVMASK32_BYTE3;
+  line0 |= line1 & MASK32_BYTE3;
+  line1 &= INVMASK32_BYTE3;
+  line1 |= line2 & MASK32_BYTE3;
+  line2 &= INVMASK32_BYTE3;
+  line2 |= line3 & MASK32_BYTE3;
+  line3 &= INVMASK32_BYTE3;
+  line3 |= temp;
+
+  (*state).i[0] = line0;
+  (*state).i[1] = line1;
+  (*state).i[2] = line2;
+  (*state).i[3] = line3;
 }
 #endif // #if (defined(CBC) && CBC == 1) || (defined(ECB) && ECB == 1)
 
