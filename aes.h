@@ -8,7 +8,7 @@
 // Platform-specific optimizations
 
 // On AVR platforms, use flash memory to store static lookup tables, to conserve SRAM
-#ifdef __AVR_ARCH__
+#if defined(__AVR_ARCH__) || defined(ESP8266)
   #include <avr/pgmspace.h>
 #else
   // Generic implementation: Emulate PROGMEM using regular RAM
@@ -45,18 +45,24 @@
 
 #if defined(AES256) && (AES256 == 1)
     #define AES_KEYLEN 32
-    #define AES_keyExpSize 240
+    #define AES_keyExpSize 240 / AES_BLOCKLEN
 #elif defined(AES192) && (AES192 == 1)
     #define AES_KEYLEN 24
-    #define AES_keyExpSize 208
+    #define AES_keyExpSize 208 / AES_BLOCKLEN
 #else
     #define AES_KEYLEN 16   // Key length in bytes
-    #define AES_keyExpSize 176
+    #define AES_keyExpSize 176 / AES_BLOCKLEN
 #endif
+
+typedef union 
+{
+  uint8_t a[AES_BLOCKLEN];
+  uint32_t i[AES_BLOCKLEN / 4];
+} roundKey_t;
 
 struct AES_ctx
 {
-  uint8_t RoundKey[AES_keyExpSize];
+  roundKey_t RoundKey[AES_keyExpSize];
 #if (defined(CBC) && (CBC == 1)) || (defined(CTR) && (CTR == 1))
   uint8_t Iv[AES_BLOCKLEN];
 #endif

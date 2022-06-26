@@ -141,32 +141,26 @@ static uint8_t getSBoxValue(uint8_t num)
 }
 */
 #define getSBoxValue(num) (pgm_read_byte(sbox + (num)))
+#define getRconValue(num) (pgm_read_byte(Rcon + (num)))
 
 // This function produces Nb(Nr+1) round keys. The round keys are used in each round to decrypt the states. 
-static void KeyExpansion(uint8_t* RoundKey, const uint8_t* Key)
+static void KeyExpansion(roundKey_t* RoundKey, const uint8_t* Key)
 {
   unsigned i, j, k;
-  uint8_t tempa[4]; // Used for the column/row operations
+  union {
+    uint8_t a[4]; // Used for the column/row operations
+    uint32_t i;
+  } temp;
   
   // The first round key is the key itself.
-  for (i = 0; i < Nk; ++i)
-  {
-    RoundKey[(i * 4) + 0] = Key[(i * 4) + 0];
-    RoundKey[(i * 4) + 1] = Key[(i * 4) + 1];
-    RoundKey[(i * 4) + 2] = Key[(i * 4) + 2];
-    RoundKey[(i * 4) + 3] = Key[(i * 4) + 3];
-  }
+  memcpy(RoundKey, Key, 4 * Nk);
 
   // All other round keys are found from the previous round keys.
   for (i = Nk; i < Nb * (Nr + 1); ++i)
   {
     {
-      k = (i - 1) * 4;
-      tempa[0]=RoundKey[k + 0];
-      tempa[1]=RoundKey[k + 1];
-      tempa[2]=RoundKey[k + 2];
-      tempa[3]=RoundKey[k + 3];
-
+      k = (i - 1);
+      temp.i = RoundKey->i[k];
     }
 
     if (i % Nk == 0)
@@ -176,11 +170,9 @@ static void KeyExpansion(uint8_t* RoundKey, const uint8_t* Key)
 
       // Function RotWord()
       {
-        const uint8_t u8tmp = tempa[0];
-        tempa[0] = tempa[1];
-        tempa[1] = tempa[2];
-        tempa[2] = tempa[3];
-        tempa[3] = u8tmp;
+        const uint8_t u8tmp = temp.a[0];
+        temp.i >>= 8;
+        temp.a[3] = u8tmp;
       }
 
       // SubWord() is a function that takes a four-byte input word and 
@@ -188,31 +180,28 @@ static void KeyExpansion(uint8_t* RoundKey, const uint8_t* Key)
 
       // Function Subword()
       {
-        tempa[0] = getSBoxValue(tempa[0]);
-        tempa[1] = getSBoxValue(tempa[1]);
-        tempa[2] = getSBoxValue(tempa[2]);
-        tempa[3] = getSBoxValue(tempa[3]);
+        temp.a[0] = getSBoxValue(temp.a[0]);
+        temp.a[1] = getSBoxValue(temp.a[1]);
+        temp.a[2] = getSBoxValue(temp.a[2]);
+        temp.a[3] = getSBoxValue(temp.a[3]);
       }
 
-      tempa[0] = tempa[0] ^  (pgm_read_byte(Rcon + (i/Nk)));
+      temp.a[0] = temp.a[0] ^ getRconValue(i/Nk);
     }
 #if defined(AES256) && (AES256 == 1)
     if (i % Nk == 4)
     {
       // Function Subword()
       {
-        tempa[0] = getSBoxValue(tempa[0]);
-        tempa[1] = getSBoxValue(tempa[1]);
-        tempa[2] = getSBoxValue(tempa[2]);
-        tempa[3] = getSBoxValue(tempa[3]);
+        temp.a[0] = getSBoxValue(temp.a[0]);
+        temp.a[1] = getSBoxValue(temp.a[1]);
+        temp.a[2] = getSBoxValue(temp.a[2]);
+        temp.a[3] = getSBoxValue(temp.a[3]);
       }
     }
 #endif
-    j = i * 4; k=(i - Nk) * 4;
-    RoundKey[j + 0] = RoundKey[k + 0] ^ tempa[0];
-    RoundKey[j + 1] = RoundKey[k + 1] ^ tempa[1];
-    RoundKey[j + 2] = RoundKey[k + 2] ^ tempa[2];
-    RoundKey[j + 3] = RoundKey[k + 3] ^ tempa[3];
+    j = i; k=(i - Nk);
+    RoundKey->i[j] = RoundKey->i[k] ^ temp.i;
   }
 }
 
@@ -234,14 +223,14 @@ void AES_ctx_set_iv(struct AES_ctx* ctx, const uint8_t* iv)
 
 // This function adds the round key to state.
 // The round key is added to the state by an XOR function.
-static void AddRoundKey(uint8_t round, state_t* state, const uint8_t* RoundKey)
+static void AddRoundKey(uint8_t round, state_t* state, const roundKey_t* RoundKey)
 {
   uint8_t i,j;
   for (i = 0; i < 4; ++i)
   {
     for (j = 0; j < 4; ++j)
     {
-      (*state)[i][j] ^= RoundKey[(round * Nb * 4) + (i * Nb) + j];
+      (*state)[i][j] ^= RoundKey->a[(round * Nb * 4) + (i * Nb) + j];
     }
   }
 }
@@ -410,7 +399,7 @@ static void InvShiftRows(state_t* state)
 #endif // #if (defined(CBC) && CBC == 1) || (defined(ECB) && ECB == 1)
 
 // Cipher is the main function that encrypts the PlainText.
-static void Cipher(state_t* state, const uint8_t* RoundKey)
+static void Cipher(state_t* state, const roundKey_t* RoundKey)
 {
   uint8_t round = 0;
 
@@ -436,7 +425,7 @@ static void Cipher(state_t* state, const uint8_t* RoundKey)
 }
 
 #if (defined(CBC) && CBC == 1) || (defined(ECB) && ECB == 1)
-static void InvCipher(state_t* state, const uint8_t* RoundKey)
+static void InvCipher(state_t* state, const roundKey_t* RoundKey)
 {
   uint8_t round = 0;
 
