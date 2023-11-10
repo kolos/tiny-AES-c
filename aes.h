@@ -11,9 +11,11 @@
 #if defined(__AVR_ARCH__) || defined(ESP8266)
   #include <avr/pgmspace.h>
 #else
+  #ifndef PROGMEM
   // Generic implementation: Emulate PROGMEM using regular RAM
   #define PROGMEM
   inline uint8_t pgm_read_byte(const uint8_t* p) { return(*p); }
+  #endif
 #endif
 
 
